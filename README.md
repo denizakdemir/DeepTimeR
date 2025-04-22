@@ -1,24 +1,71 @@
 # DeepTimeR
 
-DeepTimeR is a multitask deep learning model for time-to-event analysis, supporting survival analysis, competing risks, and multi-state modeling. The package provides a unified framework for handling different types of time-to-event data while maintaining interpretability through attention mechanisms and rule extraction.
+DeepTimeR is a sophisticated deep learning framework for time-to-event analysis, offering a unified approach to survival analysis, competing risks, and multi-state modeling with a strong focus on interpretability and uncertainty quantification.
 
-## Installation
+[![Python 3.7+](https://img.shields.io/badge/python-3.7+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Version](https://img.shields.io/badge/version-0.1.0-green.svg)](https://github.com/deeptimer/DeepTimeR)
+
+## 🌟 Key Features
+
+- **Unified Framework**: One integrated approach for multiple time-to-event analysis tasks
+  - Traditional survival analysis
+  - Competing risks analysis
+  - Multi-state modeling
+  - Time-varying covariates support
+
+- **Robust Uncertainty Quantification**: Reliable confidence intervals with Monte Carlo Dropout
+  - Mathematically constrained prediction bounds
+  - Valid probability outputs guaranteed
+  - Visualization with uncertainty bands
+
+- **Advanced Interpretability Tools**:
+  - SHAP-based feature importance analysis
+  - LIME explanations for individual predictions
+  - Partial dependence plots for feature effects
+
+- **Comprehensive Evaluation Metrics**:
+  - Concordance index for discrimination
+  - Calibration curves and metrics
+  - Prediction error curves
+  - Time-dependent ROC curves
+
+- **Principled Constraint Framework**:
+  - Ensures valid probabilities and transitions
+  - Based on isotonic regression
+  - Mathematically optimal projections
+
+## 📦 Installation
 
 ```bash
 pip install deeptimer
 ```
 
-## Features
+## 🚀 Quick Start
 
-- Support for multiple time-to-event analysis tasks:
-  - Survival analysis
-  - Competing risks
-  - Multi-state modeling
-- Feature attention mechanism for interpretability
-- Uncertainty quantification using Monte Carlo Dropout
-- Rule extraction from trained models
-- Visualization tools for model outputs with uncertainty bounds
-- Standardized data preprocessing
+```python
+import numpy as np
+from deeptimer import DeepTimeR, SurvivalData
+from deeptimer.evaluation import ModelEvaluator
+
+# Prepare your data
+data_handler = SurvivalData()
+X, y = data_handler.prepare_data(features, times, events)
+
+# Create and train model
+model = DeepTimeR(input_dim=X.shape[1], n_intervals=100)
+model.build_model(task_type='survival')
+model.compile(task_type='survival')
+model.fit(X, y, epochs=100, batch_size=32)
+
+# Make predictions with uncertainty
+mean_preds, lower_bounds, upper_bounds = model.predict_with_uncertainty(X_test, n_samples=100)
+
+# Evaluate model performance
+evaluator = ModelEvaluator(model)
+c_index = evaluator.concordance_index(X_test, times_test, events_test)
+print(f"C-index: {c_index:.3f}")
+```
 
 ## Usage
 
