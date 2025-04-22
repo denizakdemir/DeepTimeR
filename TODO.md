@@ -1,5 +1,15 @@
 # DeepTimeR TODO List
 
+## Highest Priority
+
+### Unified Probabilistic Constraint Framework
+- [x] Refactor constraint handling to use multi-state models as the unified framework
+- [x] Implement a general constraint solver based on constrained optimization principles
+- [x] Express survival and competing risks constraints as special cases of MSM constraints
+- [x] Implement proper isotonic regression as a projection onto the monotone cone
+- [x] Add theoretical documentation on the unified constraint framework
+- [x] Create comprehensive tests for the unified constraint system
+
 ## High Priority
 
 ### Model Improvements
