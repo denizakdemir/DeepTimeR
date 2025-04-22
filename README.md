@@ -15,8 +15,9 @@ pip install deeptimer
   - Competing risks
   - Multi-state modeling
 - Feature attention mechanism for interpretability
+- Uncertainty quantification using Monte Carlo Dropout
 - Rule extraction from trained models
-- Visualization tools for model outputs
+- Visualization tools for model outputs with uncertainty bounds
 - Standardized data preprocessing
 
 ## Usage
@@ -101,6 +102,62 @@ model.fit(X, y)
 state_probs, attention_weights = model.predict(X)
 ```
 
+### Uncertainty Quantification
+
+```python
+import numpy as np
+from deeptimer import DeepTimeR
+from deeptimer.utils import plot_survival_curves_with_uncertainty
+
+# Initialize and train model (as shown in examples above)
+model = DeepTimeR(input_dim=X.shape[1], n_intervals=100)
+model.build_model(task_type='survival')
+model.compile(task_type='survival')
+model.fit(X, times, events)
+
+# Make predictions with uncertainty using Monte Carlo Dropout
+mean_preds, lower_bounds, upper_bounds = model.predict_with_uncertainty(
+    X_new, n_samples=100
+)
+
+# Plot survival curves with uncertainty bands
+plot_survival_curves_with_uncertainty(
+    mean_preds[0], lower_bounds[0], upper_bounds[0], 
+    np.linspace(0, 10, 101)
+)
+```
+
+For competing risks analysis:
+
+```python
+from deeptimer.utils import plot_cumulative_incidence_with_uncertainty
+
+# Get predictions with uncertainty for competing risks
+mean_preds, lower_bounds, upper_bounds = model.predict_with_uncertainty(
+    X_new, n_samples=100
+)
+
+# Convert to dictionary format for plotting
+risk_predictions = {
+    1: mean_preds[0, :, 0],
+    2: mean_preds[0, :, 1]
+}
+lower_bound_dict = {
+    1: lower_bounds[0, :, 0],
+    2: lower_bounds[0, :, 1]
+}
+upper_bound_dict = {
+    1: upper_bounds[0, :, 0],
+    2: upper_bounds[0, :, 1]
+}
+
+# Plot with uncertainty bands
+plot_cumulative_incidence_with_uncertainty(
+    risk_predictions, lower_bound_dict, upper_bound_dict, 
+    np.linspace(0, 10, 101)
+)
+```
+
 ## Model Architecture
 
 The model consists of three main components:
@@ -114,6 +171,7 @@ The model consists of three main components:
 
 3. **Interpretability Features**:
    - Feature attention weights
+   - Uncertainty quantification with Monte Carlo Dropout
    - Rule extraction from decision trees
    - Visualization tools
 

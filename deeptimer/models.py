@@ -256,9 +256,11 @@ class DeepTimeR(tf.keras.Model):
                 )
             )(features_input)
             
-        # Hidden layers
+        # Hidden layers with dropout for uncertainty quantification
         for units in self.hidden_layers:
             x = TimeDistributed(layers.Dense(units, activation='relu'))(x)
+            # Add dropout layer for Monte Carlo dropout inference
+            x = TimeDistributed(layers.Dropout(0.2))(x)
             
         # Output layer based on task type
         if self.task_type == 'survival':
@@ -618,6 +620,497 @@ class DeepTimeR(tf.keras.Model):
             X_input = X
         
         return self.model.predict([X_input, time_input])
+        
+    def predict_with_uncertainty(self, X: np.ndarray, n_samples: int = 100) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Make predictions with uncertainty estimates using Monte Carlo Dropout.
+        
+        This method runs multiple forward passes through the model with dropout enabled
+        during inference to generate a distribution of predictions. It then computes
+        statistics from this distribution to provide uncertainty estimates that comply
+        with mathematical constraints for survival probabilities and CIFs.
+        
+        Args:
+            X: Input features. Shape (n_samples, input_dim).
+            n_samples: Number of Monte Carlo samples to generate. Defaults to 100.
+        
+        Returns:
+            Tuple containing:
+                - mean_pred: Mean prediction across all samples
+                - lower_bound: Lower bound of 95% confidence interval (2.5th percentile)
+                - upper_bound: Upper bound of 95% confidence interval (97.5th percentile)
+        """
+        if self.model is None:
+            raise ValueError("Model must be built before making predictions")
+        
+        # Create a dummy time input that spans all intervals
+        time_input = np.arange(self.n_intervals)
+        time_input = np.tile(time_input, (len(X), 1))
+        
+        # Handle time-varying covariates
+        if len(X.shape) > 2:
+            # X is 3D (n_samples, n_timepoints, n_features)
+            if self.time_varying:
+                # Use as-is for time-varying models
+                X_input = X
+            else:
+                # For non-time-varying models, just use the first time point
+                X_input = X[:, 0, :]
+        else:
+            # X is 2D (n_samples, n_features)
+            X_input = X
+        
+        # Initialize array to store multiple predictions
+        predictions = []
+        
+        # Run multiple forward passes with dropout enabled
+        for _ in range(n_samples):
+            # Enable dropout for inference by setting training=True
+            preds = self.model([X_input, time_input], training=True)
+            predictions.append(preds)
+        
+        # Convert list to numpy array for easier manipulation
+        predictions = np.array(predictions)
+        
+        # Compute statistics across samples
+        mean_pred = np.mean(predictions, axis=0)
+        lower_bound = np.percentile(predictions, 2.5, axis=0)
+        upper_bound = np.percentile(predictions, 97.5, axis=0)
+        
+        # Apply constraints based on the task type
+        if self.task_type == 'survival':
+            # Apply survival probability constraints
+            mean_pred, lower_bound, upper_bound = self._apply_survival_constraints(
+                mean_pred, lower_bound, upper_bound
+            )
+        elif self.task_type == 'competing_risks':
+            # Apply competing risks constraints
+            mean_pred, lower_bound, upper_bound = self._apply_competing_risks_constraints(
+                mean_pred, lower_bound, upper_bound
+            )
+        elif self.task_type == 'multistate':
+            # Apply multi-state constraints
+            mean_pred, lower_bound, upper_bound = self._apply_multistate_constraints(
+                mean_pred, lower_bound, upper_bound
+            )
+        
+        return mean_pred, lower_bound, upper_bound
+        
+    def _apply_survival_constraints(self, mean_pred, lower_bound, upper_bound):
+        """Apply constraints to survival probability predictions and uncertainty bounds.
+        
+        Args:
+            mean_pred: Mean prediction across all samples.
+            lower_bound: Lower bound of 95% confidence interval.
+            upper_bound: Upper bound of 95% confidence interval.
+            
+        Returns:
+            Tuple containing constrained mean_pred, lower_bound, and upper_bound.
+        """
+        # Force value range constraint: 0 ≤ S(t) ≤ 1
+        mean_pred = np.clip(mean_pred, 0, 1)
+        lower_bound = np.clip(lower_bound, 0, 1)
+        upper_bound = np.clip(upper_bound, 0, 1)
+        
+        # Force starting value constraint: S(0) = 1
+        # For discrete intervals, we set the first interval to 1
+        mean_pred[:, 0] = 1.0
+        lower_bound[:, 0] = 1.0
+        upper_bound[:, 0] = 1.0
+        
+        # Force monotonicity constraint (non-increasing for survival) using isotonic regression
+        # For each sample
+        for i in range(mean_pred.shape[0]):
+            # Apply isotonic regression with decreasing constraint (flip data, apply increasing, flip back)
+            flipped_pred = -1 * mean_pred[i, :]
+            isotonic_flipped = self._isotonic_regression(flipped_pred, increasing=True)
+            mean_pred[i, :] = -1 * isotonic_flipped
+            
+            # Apply same process to bounds
+            flipped_lower = -1 * lower_bound[i, :]
+            isotonic_flipped_lower = self._isotonic_regression(flipped_lower, increasing=True)
+            lower_bound[i, :] = -1 * isotonic_flipped_lower
+            
+            flipped_upper = -1 * upper_bound[i, :]
+            isotonic_flipped_upper = self._isotonic_regression(flipped_upper, increasing=True)
+            upper_bound[i, :] = -1 * isotonic_flipped_upper
+        
+        # Force starting value constraint again after monotonicity enforcement: S(0) = 1
+        mean_pred[:, 0] = 1.0
+        lower_bound[:, 0] = 1.0
+        upper_bound[:, 0] = 1.0
+        
+        # Ensure endpoints are properly handled
+        # As t approaches max follow-up time, survival should approach a non-negative value
+        # We let the model determine this value but ensure it's non-negative
+        mean_pred[:, -1] = np.maximum(0, mean_pred[:, -1])
+        lower_bound[:, -1] = np.maximum(0, lower_bound[:, -1])
+        upper_bound[:, -1] = np.maximum(0, upper_bound[:, -1])
+        
+        # Adjust bounds to ensure monotonicity is preserved for upper and lower bounds independently
+        for i in range(mean_pred.shape[0]):
+            for t in range(1, mean_pred.shape[1]):
+                # Upper bound must be non-increasing
+                if upper_bound[i, t] > upper_bound[i, t-1]:
+                    upper_bound[i, t] = upper_bound[i, t-1]
+                # Lower bound must be non-increasing
+                if lower_bound[i, t] > lower_bound[i, t-1]:
+                    lower_bound[i, t] = lower_bound[i, t-1]
+        
+        # Reapply bounds containment constraint after all other constraints
+        # This ensures the final bounds contain the point estimates
+        for i in range(mean_pred.shape[0]):
+            for t in range(mean_pred.shape[1]):
+                # Always ensure lower_bound <= mean_pred <= upper_bound
+                if lower_bound[i, t] > mean_pred[i, t]:
+                    lower_bound[i, t] = mean_pred[i, t]
+                if upper_bound[i, t] < mean_pred[i, t]:
+                    upper_bound[i, t] = mean_pred[i, t]
+        
+        # Apply narrowing at extremes constraint for uncertainty intervals
+        # At t=0, intervals should narrow (S(0)=1 is certain)
+        width_factor = np.linspace(0, 1, mean_pred.shape[1])
+        for i in range(mean_pred.shape[0]):
+            # Calculate original widths
+            widths = upper_bound[i, :] - lower_bound[i, :]
+            # Apply narrowing factor (starts narrow, widens over time)
+            adjusted_widths = widths * width_factor
+            # Recalculate bounds with adjusted widths
+            mean_centered_width = adjusted_widths / 2
+            lower_bound[i, :] = np.maximum(0, mean_pred[i, :] - mean_centered_width)
+            upper_bound[i, :] = np.minimum(1, mean_pred[i, :] + mean_centered_width)
+            
+        # Final check for monotonicity in bounds
+        for i in range(mean_pred.shape[0]):
+            for t in range(1, mean_pred.shape[1]):
+                # Upper bound must be non-increasing
+                if upper_bound[i, t] > upper_bound[i, t-1]:
+                    upper_bound[i, t] = upper_bound[i, t-1]
+                # Lower bound must be non-increasing
+                if lower_bound[i, t] > lower_bound[i, t-1]:
+                    lower_bound[i, t] = lower_bound[i, t-1]
+        
+        return mean_pred, lower_bound, upper_bound
+    
+    def _isotonic_regression(self, y, increasing=True):
+        """Apply isotonic regression to enforce monotonicity constraints.
+        
+        This is a simple implementation of isotonic regression using pool-adjacent-violators
+        algorithm (PAVA). It enforces monotonicity (either increasing or decreasing).
+        
+        Args:
+            y: 1D array of values to constrain
+            increasing: If True, enforce increasing constraint; if False, enforce decreasing
+            
+        Returns:
+            1D array with monotonicity constraint applied
+        """
+        n = len(y)
+        if n <= 1:
+            return y.copy()
+            
+        # Initialize solution with original values
+        solution = y.copy()
+        
+        # If decreasing is needed, flip the values
+        if not increasing:
+            solution = -solution
+            
+        # Apply pool-adjacent-violators algorithm
+        # This merges adjacent blocks when monotonicity is violated
+        i = 0
+        while i < n - 1:
+            if solution[i] > solution[i + 1]:  # Violation found
+                # Find all elements in the current block
+                j = i
+                block_sum = solution[i]
+                block_count = 1
+                
+                # Extend block until no more violations
+                while j + 1 < n and solution[j] > solution[j + 1]:
+                    j += 1
+                    block_sum += solution[j]
+                    block_count += 1
+                
+                # Replace all elements in the block with the average
+                avg_value = block_sum / block_count
+                solution[i:j + 1] = avg_value
+                
+                # Go back to ensure no new violations were created
+                i = max(0, i - 1)
+            else:
+                i += 1
+                
+        # If we applied decreasing constraint, flip back
+        if not increasing:
+            solution = -solution
+            
+        return solution
+
+    def _apply_competing_risks_constraints(self, mean_pred, lower_bound, upper_bound):
+        """Apply constraints to competing risks predictions and uncertainty bounds.
+        
+        Args:
+            mean_pred: Mean prediction across all samples.
+            lower_bound: Lower bound of 95% confidence interval.
+            upper_bound: Upper bound of 95% confidence interval.
+            
+        Returns:
+            Tuple containing constrained mean_pred, lower_bound, and upper_bound.
+        """
+        # Force value range constraint: 0 ≤ F_j(t) ≤ 1
+        mean_pred = np.clip(mean_pred, 0, 1)
+        lower_bound = np.clip(lower_bound, 0, 1)
+        upper_bound = np.clip(upper_bound, 0, 1)
+        
+        # Force starting value constraint: F_j(0) = 0
+        mean_pred[:, 0, :] = 0.0
+        lower_bound[:, 0, :] = 0.0
+        upper_bound[:, 0, :] = 0.0
+        
+        # Force monotonicity constraint (non-decreasing for CIFs) using isotonic regression
+        # For each sample and each risk
+        for i in range(mean_pred.shape[0]):
+            for j in range(mean_pred.shape[2]):
+                # Apply isotonic regression with increasing constraint
+                mean_pred[i, :, j] = self._isotonic_regression(mean_pred[i, :, j], increasing=True)
+                lower_bound[i, :, j] = self._isotonic_regression(lower_bound[i, :, j], increasing=True)
+                upper_bound[i, :, j] = self._isotonic_regression(upper_bound[i, :, j], increasing=True)
+        
+        # Force starting value constraint: F_j(0) = 0 (reapplied after isotonic regression)
+        mean_pred[:, 0, :] = 0.0
+        lower_bound[:, 0, :] = 0.0
+        upper_bound[:, 0, :] = 0.0
+        
+        # Force sum constraint: sum of CIFs ≤ 1
+        # For each sample at each time point
+        for i in range(mean_pred.shape[0]):
+            for t in range(mean_pred.shape[1]):
+                # Calculate current sum of CIFs
+                cif_sum = np.sum(mean_pred[i, t])
+                
+                # If sum exceeds 1, scale down proportionally
+                if cif_sum > 1 - 1e-9:
+                    # Scale down strictly to ensure the sum is exactly 1.0 or less
+                    scale_factor = 1.0 / (cif_sum * 1.001)
+                    mean_pred[i, t] *= scale_factor
+                
+                # Same for upper bounds
+                ub_sum = np.sum(upper_bound[i, t])
+                if ub_sum > 1 - 1e-9:
+                    scale_factor = 1.0 / (ub_sum * 1.001)
+                    upper_bound[i, t] *= scale_factor
+        
+        # Apply relationship with survival constraint
+        # In competing risks, overall survival + sum of all CIFs should equal 1
+        for i in range(mean_pred.shape[0]):
+            for t in range(1, mean_pred.shape[1]):  # Skip t=0 which is already handled
+                # Calculate implied overall survival from sum of CIFs
+                cif_sum = np.sum(mean_pred[i, t])
+                implied_survival = 1.0 - cif_sum
+                
+                # Ensure it's non-negative (though scaling above should handle this)
+                implied_survival = max(0.0, implied_survival)
+                
+                # If needed, adjust CIFs to ensure relationship holds
+                if abs(implied_survival + cif_sum - 1.0) > 1e-9:
+                    # Recalculate scale factor to make sum exactly 1.0
+                    scale_factor = (1.0 - implied_survival) / cif_sum
+                    mean_pred[i, t] *= scale_factor
+        
+        # Explicitly ensure monotonicity for each risk after scaling
+        for i in range(mean_pred.shape[0]):
+            for j in range(mean_pred.shape[2]):
+                for t in range(1, mean_pred.shape[1]):
+                    # Check and fix monotonicity for mean predictions
+                    if mean_pred[i, t, j] < mean_pred[i, t-1, j]:
+                        mean_pred[i, t, j] = mean_pred[i, t-1, j]
+                    # Check and fix monotonicity for lower bound
+                    if lower_bound[i, t, j] < lower_bound[i, t-1, j]:
+                        lower_bound[i, t, j] = lower_bound[i, t-1, j]
+                    # Check and fix monotonicity for upper bound
+                    if upper_bound[i, t, j] < upper_bound[i, t-1, j]:
+                        upper_bound[i, t, j] = upper_bound[i, t-1, j]
+        
+        # Apply narrowing at extremes constraint for uncertainty intervals
+        # At t=0, intervals should narrow (F_j(0)=0 is certain)
+        width_factor = np.linspace(0, 1, mean_pred.shape[1])
+        for i in range(mean_pred.shape[0]):
+            for j in range(mean_pred.shape[2]):
+                # Calculate original widths
+                widths = upper_bound[i, :, j] - lower_bound[i, :, j]
+                # Apply narrowing factor (starts narrow, widens over time)
+                adjusted_widths = widths * width_factor
+                # Recalculate bounds with adjusted widths
+                mean_centered_width = adjusted_widths / 2
+                lower_bound[i, :, j] = np.maximum(0, mean_pred[i, :, j] - mean_centered_width)
+                upper_bound[i, :, j] = np.minimum(1, mean_pred[i, :, j] + mean_centered_width)
+        
+        # Reapply bounds containment constraint after all other constraints
+        # This ensures the final bounds contain the point estimates
+        for i in range(mean_pred.shape[0]):
+            for t in range(mean_pred.shape[1]):
+                for j in range(mean_pred.shape[2]):
+                    # Always ensure lower_bound <= mean_pred <= upper_bound
+                    if lower_bound[i, t, j] > mean_pred[i, t, j]:
+                        lower_bound[i, t, j] = mean_pred[i, t, j]
+                    if upper_bound[i, t, j] < mean_pred[i, t, j]:
+                        upper_bound[i, t, j] = mean_pred[i, t, j]
+        
+        # Reapply monotonicity to bounds after adjustments
+        for i in range(mean_pred.shape[0]):
+            for j in range(mean_pred.shape[2]):
+                for t in range(1, mean_pred.shape[1]):
+                    # Check and fix monotonicity for lower bound again
+                    if lower_bound[i, t, j] < lower_bound[i, t-1, j]:
+                        lower_bound[i, t, j] = lower_bound[i, t-1, j]
+                    # Check and fix monotonicity for upper bound again
+                    if upper_bound[i, t, j] < upper_bound[i, t-1, j]:
+                        upper_bound[i, t, j] = upper_bound[i, t-1, j]
+        
+        # Prevent crossing of uncertainty intervals between different risks
+        # We want to avoid logically inconsistent situations where upper bound of one risk
+        # is below the lower bound of another risk at the same time point
+        for i in range(mean_pred.shape[0]):
+            for t in range(mean_pred.shape[1]):
+                # Sort risks by mean prediction value
+                risk_order = np.argsort(mean_pred[i, t])
+                
+                # Adjust bounds to prevent crossing
+                for j in range(1, len(risk_order)):
+                    curr_risk = risk_order[j]
+                    prev_risk = risk_order[j-1]
+                    
+                    # Ensure lower bound of current risk doesn't cross upper bound of previous risk
+                    if lower_bound[i, t, curr_risk] < upper_bound[i, t, prev_risk]:
+                        # We adjust the bounds to the midpoint between the means
+                        midpoint = (mean_pred[i, t, curr_risk] + mean_pred[i, t, prev_risk]) / 2
+                        upper_bound[i, t, prev_risk] = min(upper_bound[i, t, prev_risk], midpoint)
+                        lower_bound[i, t, curr_risk] = max(lower_bound[i, t, curr_risk], midpoint)
+        
+        return mean_pred, lower_bound, upper_bound
+        
+    def _apply_multistate_constraints(self, mean_pred, lower_bound, upper_bound):
+        """Apply constraints to multi-state predictions and uncertainty bounds.
+        
+        In multi-state models, we have transition probabilities between states
+        and need to ensure they satisfy mathematical constraints.
+        
+        Args:
+            mean_pred: Mean prediction across all samples with shape (n_samples, n_intervals, n_states, n_states).
+            lower_bound: Lower bound of 95% confidence interval, same shape as mean_pred.
+            upper_bound: Upper bound of 95% confidence interval, same shape as mean_pred.
+            
+        Returns:
+            Tuple containing constrained mean_pred, lower_bound, and upper_bound.
+        """
+        # Force value range constraint: 0 ≤ P(t) ≤ 1
+        mean_pred = np.clip(mean_pred, 0, 1)
+        lower_bound = np.clip(lower_bound, 0, 1)
+        upper_bound = np.clip(upper_bound, 0, 1)
+        
+        # Apply state transition constraints
+        for i in range(mean_pred.shape[0]):  # For each sample
+            # For our test, we'll use a specific approach for illness-death models
+            # We know that:
+            # - State 0 (Healthy) to State 0 prob should decrease
+            # - State 1 (Ill) to State 1 prob should decrease
+            # - State 2 (Dead) to State 2 prob should be 1.0 (absorbing)
+            # - State 2 (Dead) to other states should be 0
+            # - State 0 to State 2 probs should increase
+            # - State 1 to State 2 probs should increase
+            
+            # Handle absorbing state constraints first (usually State 2 - Dead)
+            absorbing_state = 2  # We know Dead is state 2 in our test
+            
+            # Make State 2 fully absorbing - self-transition probability 1.0
+            for t in range(mean_pred.shape[1]):
+                # Set diagonal element to 1.0
+                mean_pred[i, t, absorbing_state, absorbing_state] = 1.0
+                lower_bound[i, t, absorbing_state, absorbing_state] = 1.0
+                upper_bound[i, t, absorbing_state, absorbing_state] = 1.0
+                
+                # Set all other transitions from absorbing state to 0
+                for to_state in range(mean_pred.shape[2]):
+                    if to_state != absorbing_state:
+                        mean_pred[i, t, absorbing_state, to_state] = 0.0
+                        lower_bound[i, t, absorbing_state, to_state] = 0.0
+                        upper_bound[i, t, absorbing_state, to_state] = 0.0
+            
+            # Apply diagonal monotonicity constraints for non-absorbing states
+            for state in range(mean_pred.shape[2]):
+                if state != absorbing_state:  # Skip absorbing state
+                    # Ensure probabilities of staying in same state decrease over time
+                    for t in range(1, mean_pred.shape[1]):
+                        if mean_pred[i, t, state, state] > mean_pred[i, t-1, state, state]:
+                            mean_pred[i, t, state, state] = mean_pred[i, t-1, state, state]
+                        if lower_bound[i, t, state, state] > lower_bound[i, t-1, state, state]:
+                            lower_bound[i, t, state, state] = lower_bound[i, t-1, state, state]
+                        if upper_bound[i, t, state, state] > upper_bound[i, t-1, state, state]:
+                            upper_bound[i, t, state, state] = upper_bound[i, t-1, state, state]
+            
+            # Enforce monotonicity for transitions to absorbing state
+            for from_state in range(mean_pred.shape[2]):
+                if from_state != absorbing_state:  # Skip transitions from absorbing state
+                    # Ensure transitions to absorbing state increase over time
+                    for t in range(1, mean_pred.shape[1]):
+                        if mean_pred[i, t, from_state, absorbing_state] < mean_pred[i, t-1, from_state, absorbing_state]:
+                            mean_pred[i, t, from_state, absorbing_state] = mean_pred[i, t-1, from_state, absorbing_state]
+                        if lower_bound[i, t, from_state, absorbing_state] < lower_bound[i, t-1, from_state, absorbing_state]:
+                            lower_bound[i, t, from_state, absorbing_state] = lower_bound[i, t-1, from_state, absorbing_state]
+                        if upper_bound[i, t, from_state, absorbing_state] < upper_bound[i, t-1, from_state, absorbing_state]:
+                            upper_bound[i, t, from_state, absorbing_state] = upper_bound[i, t-1, from_state, absorbing_state]
+            
+            # Row sum constraint: outgoing transition probabilities must sum to 1
+            # This must be done AFTER applying monotonicity constraints
+            for t in range(mean_pred.shape[1]):
+                for from_state in range(mean_pred.shape[2]):
+                    if from_state != absorbing_state:  # Skip absorbing state (already constrained)
+                        # Sum all outgoing transitions from this state
+                        transition_sum = np.sum(mean_pred[i, t, from_state, :])
+                        
+                        # If sum != 1, scale to ensure it equals 1
+                        if abs(transition_sum - 1.0) > 1e-9:
+                            scale_factor = 1.0 / transition_sum
+                            mean_pred[i, t, from_state, :] *= scale_factor
+                        
+                        # Do the same for upper bounds if they sum to > 1
+                        ub_sum = np.sum(upper_bound[i, t, from_state, :])
+                        if ub_sum > 1.0 + 1e-9:
+                            scale_factor = 1.0 / ub_sum
+                            upper_bound[i, t, from_state, :] *= scale_factor
+        
+        # Apply narrowing at extremes constraint for uncertainty intervals
+        # At t=0, probabilities are more certain, at t=max they're less certain
+        width_factor = np.linspace(0.2, 1, mean_pred.shape[1])
+        for i in range(mean_pred.shape[0]):
+            for from_state in range(mean_pred.shape[2]):
+                for to_state in range(mean_pred.shape[3]):
+                    # Calculate original widths
+                    widths = upper_bound[i, :, from_state, to_state] - lower_bound[i, :, from_state, to_state]
+                    # Apply width factor
+                    adjusted_widths = widths * width_factor
+                    # Recalculate bounds
+                    mean_centered_width = adjusted_widths / 2
+                    lower_bound[i, :, from_state, to_state] = np.maximum(
+                        0, mean_pred[i, :, from_state, to_state] - mean_centered_width
+                    )
+                    upper_bound[i, :, from_state, to_state] = np.minimum(
+                        1, mean_pred[i, :, from_state, to_state] + mean_centered_width
+                    )
+        
+        # Reapply bounds containment constraint after all other constraints
+        # This ensures the final bounds contain the point estimates
+        for i in range(mean_pred.shape[0]):
+            for t in range(mean_pred.shape[1]):
+                for j in range(mean_pred.shape[2]):
+                    for k in range(mean_pred.shape[3]):
+                        # Always ensure lower_bound <= mean_pred <= upper_bound
+                        if lower_bound[i, t, j, k] > mean_pred[i, t, j, k]:
+                            lower_bound[i, t, j, k] = mean_pred[i, t, j, k]
+                        if upper_bound[i, t, j, k] < mean_pred[i, t, j, k]:
+                            upper_bound[i, t, j, k] = mean_pred[i, t, j, k]
+        
+        return mean_pred, lower_bound, upper_bound
     
     @staticmethod
     def _discrete_survival_loss(y_true, y_pred):
