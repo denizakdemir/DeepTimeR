@@ -6,9 +6,9 @@ setup(
     description="A multitask deep learning model for time-to-event analysis",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
-    author="DeepTimeR Team",
-    author_email="contact@deeptimer.org",
-    url="https://github.com/deeptimer/DeepTimeR",
+    author="Deniz Akdemir",
+    author_email="deniz.akdemir.work@gmail.com",
+    url="https://github.com/denizakdemir/DeepTimeR",
     packages=find_packages(),
     install_requires=[
         "tensorflow>=2.8.0",
@@ -36,7 +36,7 @@ setup(
     keywords="survival analysis, competing risks, multi-state model, deep learning, time-to-event",
     project_urls={
         "Documentation": "https://deeptimer.readthedocs.io",
-        "Source": "https://github.com/deeptimer/DeepTimeR",
-        "Issue Tracker": "https://github.com/deeptimer/DeepTimeR/issues",
+        "Source": "https://github.com/denizakdemir/DeepTimeR",
+        "Issue Tracker": "https://github.com/denizakdemir/DeepTimeR/issues",
     },
 ) 

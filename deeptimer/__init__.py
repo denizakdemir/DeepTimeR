@@ -7,9 +7,13 @@ This package provides tools for:
 - Hyperparameter tuning
 - Advanced evaluation metrics
 - Advanced interpretability features
+
+Author: Deniz Akdemir (deniz.akdemir.work@gmail.com)
 """
 
 __version__ = "0.1.0"
+__author__ = "Deniz Akdemir"
+__email__ = "deniz.akdemir.work@gmail.com"
 
 from .models import DeepTimeR
 from .data import BaseData, SurvivalData, CompetingRisksData, MultiStateData

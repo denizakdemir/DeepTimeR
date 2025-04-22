@@ -2,9 +2,11 @@
 
 DeepTimeR is a sophisticated deep learning framework for time-to-event analysis, offering a unified approach to survival analysis, competing risks, and multi-state modeling with a strong focus on interpretability and uncertainty quantification.
 
+**Author:** Deniz Akdemir (deniz.akdemir.work@gmail.com)
+
 [![Python 3.7+](https://img.shields.io/badge/python-3.7+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/version-0.1.0-green.svg)](https://github.com/deeptimer/DeepTimeR)
+[![Version](https://img.shields.io/badge/version-0.1.0-green.svg)](https://github.com/denizakdemir/DeepTimeR)
 
 ## 🌟 Key Features
 
