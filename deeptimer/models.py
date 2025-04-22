@@ -182,12 +182,15 @@ class DeepTimeR(tf.keras.Model):
             # Set the number of states from the state structure
             self.n_states = len(self._state_structure['states'])
     
-    def compile_model(self, optimizer='adam', metrics=None):
+    def compile_model(self, optimizer='adam', metrics=None, custom_loss=None, loss_weights=None, **kwargs):
         """Compile the model with appropriate loss and metrics.
         
         Args:
             optimizer: String or optimizer instance
             metrics: List of metrics to track
+            custom_loss: Optional custom loss function to use instead of the default
+            loss_weights: Optional weights for different loss components if using a custom loss
+            **kwargs: Additional arguments to pass to model.compile()
         """
         if self.model is None:
             self._build_model()
@@ -195,25 +198,41 @@ class DeepTimeR(tf.keras.Model):
         if metrics is None:
             metrics = []
         
-        if self.task_type == 'survival':
-            loss = self._discrete_survival_loss
-            metrics.extend(['accuracy'])
-        elif self.task_type == 'competing_risks':
-            loss = self._competing_risks_loss
-            metrics.extend(['accuracy'])
-        elif self.task_type == 'multistate':
-            loss = self._multistate_loss
-            metrics.extend(['accuracy'])
+        # Use custom loss if provided, otherwise use default loss for the task type
+        if custom_loss is not None:
+            loss = custom_loss
         else:
-            raise ValueError(f"Unsupported task type: {self.task_type}")
+            if self.task_type == 'survival':
+                loss = self._discrete_survival_loss
+                metrics.extend(['accuracy'])
+            elif self.task_type == 'competing_risks':
+                loss = self._competing_risks_loss
+                metrics.extend(['accuracy'])
+            elif self.task_type == 'multistate':
+                loss = self._multistate_loss
+                metrics.extend(['accuracy'])
+            else:
+                raise ValueError(f"Unsupported task type: {self.task_type}")
+        
+        # Add gradient clipping to prevent exploding gradients
+        if isinstance(optimizer, str):
+            if optimizer == 'adam':
+                optimizer = tf.keras.optimizers.Adam(clipnorm=1.0)
+            elif optimizer == 'sgd':
+                optimizer = tf.keras.optimizers.SGD(clipnorm=1.0)
+            elif optimizer == 'rmsprop':
+                optimizer = tf.keras.optimizers.RMSprop(clipnorm=1.0)
+            # For other string optimizers, we can't add clipping directly
         
         self.model.compile(
             optimizer=optimizer,
             loss=loss,
-            metrics=metrics
+            metrics=metrics,
+            loss_weights=loss_weights,
+            **kwargs
         )
         
-    def compile(self, task_type=None, optimizer='adam', metrics=None):
+    def compile(self, task_type=None, optimizer='adam', metrics=None, custom_loss=None, loss_weights=None, **kwargs):
         """Compile the model with appropriate loss and metrics.
         
         This is a convenience method for API compatibility with tests.
@@ -222,6 +241,9 @@ class DeepTimeR(tf.keras.Model):
             task_type: Type of survival analysis task. If provided, updates the current task type.
             optimizer: String or optimizer instance
             metrics: List of metrics to track
+            custom_loss: Optional custom loss function to use instead of the default
+            loss_weights: Optional weights for different loss components if using a custom loss
+            **kwargs: Additional arguments to pass to model.compile()
         """
         if task_type is not None:
             self.task_type = task_type
@@ -230,7 +252,13 @@ class DeepTimeR(tf.keras.Model):
         self.build_model(task_type)
         
         # Compile the model
-        self.compile_model(optimizer=optimizer, metrics=metrics)
+        self.compile_model(
+            optimizer=optimizer, 
+            metrics=metrics, 
+            custom_loss=custom_loss, 
+            loss_weights=loss_weights, 
+            **kwargs
+        )
     
     def _build_model(self):
         """Build the neural network model based on task type."""

@@ -4,8 +4,11 @@ setup(
     name="deeptimer",
     version="0.1.0",
     description="A multitask deep learning model for time-to-event analysis",
-    author="Your Name",
-    author_email="your.email@example.com",
+    long_description=open("README.md").read(),
+    long_description_content_type="text/markdown",
+    author="DeepTimeR Team",
+    author_email="contact@deeptimer.org",
+    url="https://github.com/deeptimer/DeepTimeR",
     packages=find_packages(),
     install_requires=[
         "tensorflow>=2.8.0",
@@ -13,6 +16,9 @@ setup(
         "pandas>=1.2.0",
         "scikit-learn>=0.24.0",
         "matplotlib>=3.3.0",
+        "lifelines>=0.27.0",
+        "shap>=0.40.0",
+        "lime>=0.2.0",
     ],
     python_requires=">=3.7",
     classifiers=[
@@ -23,5 +29,14 @@ setup(
         "Programming Language :: Python :: 3.7",
         "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
+        "Topic :: Scientific/Engineering :: Artificial Intelligence",
+        "Topic :: Scientific/Engineering :: Medical Science Apps.",
     ],
+    keywords="survival analysis, competing risks, multi-state model, deep learning, time-to-event",
+    project_urls={
+        "Documentation": "https://deeptimer.readthedocs.io",
+        "Source": "https://github.com/deeptimer/DeepTimeR",
+        "Issue Tracker": "https://github.com/deeptimer/DeepTimeR/issues",
+    },
 ) 
